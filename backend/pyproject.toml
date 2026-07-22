@@ -1,0 +1,11 @@
+[project]
+name = "pl-predictor"
+version = "0.1.0"
+description = "Monte Carlo and RAG-based Premier League prediction engine"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "scipy",
+    "chromadb",
+    "python-dotenv"
+]

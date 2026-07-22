@@ -216,3 +216,18 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Raw & Processed Soccer Data
+data/*
+!data/.gitkeep
+
+# ChromaDB Local Vector Store (RAG)
+chroma_db/
+        
+# Frontend (Node.js / React / Next.js)
+node_modules/
+.next/
+out/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
