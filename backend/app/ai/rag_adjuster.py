@@ -91,10 +91,14 @@ def batch_calculate_team_deltas(team_contexts: dict) -> dict:
         return {}
 
     prompt = f"""
-    You are a quantitative sports analyst. Analyze the following recent news and official FPL injuries for Premier League teams.
-    For EACH team provided in the JSON payload below, determine the statistical impact on their attacking (att_delta) and defensive (def_delta) strength multipliers.
-    A major injury to a key striker should result in a negative att_delta (e.g., -0.15).
-    A major defensive signing should result in a positive def_delta (e.g., +0.10).
+    You are an expert football analytics evaluator. 
+    Given scraped team headlines and active injury reports, determine realistic numerical delta adjustments for attack (att_delta) and defense (def_delta).
+
+    CRITICAL GROUNDING RULES:
+    1. ONLY evaluate facts explicitly present in the provided context. DO NOT hallucinate or assume worst-case scenarios (e.g. do not invent 6-month or ACL tears unless explicitly confirmed in text).
+    2. If players are listed as available, returning, or fully fit, att_delta and def_delta MUST be 0.0.
+    3. Keep all adjustments strictly bounded between -0.15 and +0.15.
+    4. Output valid JSON only with keys: "att_delta", "def_delta", "reasoning".
 
     Team Data Payload:
     {json.dumps(team_contexts, indent=2)}

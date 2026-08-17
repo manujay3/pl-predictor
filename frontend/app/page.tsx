@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip as RechartsTooltip, ResponsiveContainer, Cell } from 'recharts';
+import FixturesTable from './Fixtures';
 
 interface TeamStanding {
   team: string;
@@ -307,7 +308,7 @@ export default function Home() {
             <div className="flex justify-between items-start mb-4">
               <div>
                 <h3 className="text-3xl font-bold text-white mb-1">{selectedTeam.team}</h3>
-                <p className="text-gray-400 text-sm mb-2">Monte Carlo Position Distribution</p>
+                <p className="text-gray-400 text-sm mb-2">Monte Carlo Position Distribution & Match Odds</p>
               </div>
               <button 
                 onClick={() => setSelectedTeam(null)} 
@@ -401,7 +402,7 @@ export default function Home() {
               </div>
             </div>
             
-            <div className="h-64 w-full">
+            <div className="h-64 w-full mb-8">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart 
                   data={Object.entries(selectedTeam.positions).map(([pos, prob]) => ({ position: pos, probability: prob }))}
@@ -428,6 +429,14 @@ export default function Home() {
                 </BarChart>
               </ResponsiveContainer>
             </div>
+
+            {/* --- ADDED FIXTURES TABLE --- */}
+            <div className="pt-6 border-t border-gray-600/60">
+              <h3 className="text-lg font-bold text-white mb-2">Simulated Match Odds</h3>
+              <p className="text-xs text-gray-400 mb-4">Win/Draw/Loss probabilities generated from current AI multipliers.</p>
+              <FixturesTable teamFilter={selectedTeam.team} />
+            </div>
+
           </div>
         </div>
       )}
