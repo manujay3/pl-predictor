@@ -9,16 +9,12 @@ from typing import Dict, Optional
 
 from app.db.database import engine, Base, get_db, SessionLocal
 from app.db.models import TeamRating
-from app.services.news_scraper import scrape_latest_news
-from app.services.football_client import fetch_pl_ratings 
-from app.services.fpl_client import fetch_injured_players
-from app.ai.rag_adjuster import query_team_news, batch_calculate_team_deltas, evaluate_custom_scenario
-from app.engine.simulator import run_season_simulation
+from app.services.fpl_client import fetch_pl_ratings, fetch_team_details
+from app.ai.rag_adjuster import evaluate_custom_scenario
+from app.engine.simulator import run_season_simulation, generate_all_fixture_odds
 
-# Create database tables
 Base.metadata.create_all(bind=engine)
 
-# --- Pydantic Models ---
 class TeamOverride(BaseModel):
     att_delta: float = 0.0
     def_delta: float = 0.0
@@ -30,70 +26,29 @@ class NLPSimulationRequest(BaseModel):
     team: str
     scenario: str
 
-
-# --- ETL & Background Processing ---
 def execute_full_refresh(db: Session):
-    print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Running Background ETL Pipeline...")
-    
-    scrape_latest_news()
+    print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Refreshing baseline from FPL API...")
     raw_ratings = fetch_pl_ratings()
-    all_injuries = fetch_injured_players()
     
-    team_contexts = {}
-    for team in raw_ratings:
-        news_context = query_team_news(team)
-        team_injuries = all_injuries.get(team, [])
-        if news_context or team_injuries:
-            team_contexts[team] = {
-                "news": news_context if news_context else "No recent news.",
-                "injuries": team_injuries if team_injuries else ["No injuries."]
-            }
-
-    ai_adjustments = batch_calculate_team_deltas(team_contexts)
-    if not isinstance(ai_adjustments, dict):
-        ai_adjustments = {}
-    
-    # Wipe old cache rows
     db.query(TeamRating).delete()
-    
     for team, stats in raw_ratings.items():
-        deltas = ai_adjustments.get(team, {})
-        if not isinstance(deltas, dict):
-            deltas = {}
-        
-        raw_att_delta = deltas.get("att_delta", 0.0) if isinstance(deltas.get("att_delta"), (int, float)) else 0.0
-        raw_def_delta = deltas.get("def_delta", 0.0) if isinstance(deltas.get("def_delta"), (int, float)) else 0.0
-        insight = deltas.get("reasoning", None) if isinstance(deltas.get("reasoning"), str) else None
-        
-        # Strictly clamp AI deltas between -0.15 and +0.15 to preserve squad baseline integrity
-        att_delta = max(-0.15, min(0.15, raw_att_delta))
-        def_delta = max(-0.15, min(0.15, raw_def_delta))
-        
-        # Apply clamped adjustments with a stable 0.5 floor
-        final_att = max(0.5, stats["att"] + att_delta)
-        final_def = max(0.5, stats["def"] + def_delta)
-        
         new_rating = TeamRating(
             team_name=team,
-            att_strength=final_att,
-            def_strength=final_def,
-            ai_insight=insight
+            att_strength=stats["att"],
+            def_strength=stats["def"],
+            ai_insight=None
         )
         db.add(new_rating)
-        
     db.commit()
-    print("Background ETL Pipeline complete. Database updated.")
+    print("ETL complete. Official FPL data loaded.")
 
 def scheduled_etl_task():
-    """Wrapper to handle the DB session for the background worker."""
     db = SessionLocal()
     try:
         execute_full_refresh(db)
     finally:
         db.close()
 
-
-# --- Lifespan Setup ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler = BackgroundScheduler()
@@ -112,13 +67,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# --- Helper Functions ---
 def _build_ratings_dict(db_ratings, overrides=None):
-    """Builds ratings dict and AI insights mapping from database rows."""
     ratings = {}
     ai_insights = {}
-    
     for r in db_ratings:
         base_att = r.att_strength
         base_def = r.def_strength
@@ -133,11 +84,9 @@ def _build_ratings_dict(db_ratings, overrides=None):
 
         ratings[r.team_name] = {"att": base_att, "def": base_def}
         ai_insights[r.team_name] = insight
-        
     return ratings, ai_insights
 
 def _format_standings(sim_data, ai_insights):
-    """Sorts simulation metrics by expected points and goal difference."""
     return [
         {
             "team": team, 
@@ -151,92 +100,30 @@ def _format_standings(sim_data, ai_insights):
         )
     ]
 
-
-# --- API Endpoints ---
 @app.get("/api/simulate")
 def get_simulation_results(force: bool = False, db: Session = Depends(get_db)):
     try:
         db_ratings = db.query(TeamRating).all()
-        
         if force or not db_ratings:
             execute_full_refresh(db)
             db_ratings = db.query(TeamRating).all()
-            data_source = "live refresh"
+            data_source = "FPL Live API Refresh"
         else:
-            data_source = "database cache"
+            data_source = "Database Cache (FPL)"
 
         ratings, ai_insights = _build_ratings_dict(db_ratings)
         sim_data = run_season_simulation(ratings, num_simulations=1000)
-        
         return {
             "status": "success",
             "source": data_source,
             "iterations": 1000, 
             "standings": _format_standings(sim_data, ai_insights)
         }
-        
     except Exception as e:
-        print(f"API Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/simulate/custom")
-def run_custom_simulation(request: CustomSimulationRequest, db: Session = Depends(get_db)):
-    try:
-        db_ratings = db.query(TeamRating).all()
-        if not db_ratings:
-            raise HTTPException(status_code=400, detail="Database is empty. Please run a standard simulation first.")
-
-        override_dict = {
-            team: {"att_delta": data.att_delta, "def_delta": data.def_delta}
-            for team, data in request.overrides.items()
-        }
-
-        ratings, ai_insights = _build_ratings_dict(db_ratings, override_dict)
-        sim_data = run_season_simulation(ratings, num_simulations=1000)
-        
-        return {
-            "status": "success",
-            "source": "custom simulation",
-            "iterations": 1000, 
-            "standings": _format_standings(sim_data, ai_insights)
-        }
-        
-    except Exception as e:
-        print(f"API Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/simulate/nlp-scenario")
-def run_nlp_scenario(request: NLPSimulationRequest, db: Session = Depends(get_db)):
-    try:
-        db_ratings = db.query(TeamRating).all()
-        if not db_ratings:
-            raise HTTPException(status_code=400, detail="Database empty. Run standard simulation first.")
-
-        # Translate scenario prompt into numerical delta adjustments
-        ai_evaluation = evaluate_custom_scenario(request.team, request.scenario)
-        
-        override_dict = {request.team: ai_evaluation}
-        ratings, ai_insights = _build_ratings_dict(db_ratings, override_dict)
-
-        sim_data = run_season_simulation(ratings, num_simulations=1000)
-        
-        return {
-            "status": "success",
-            "source": "AI scenario simulation",
-            "iterations": 1000, 
-            "ai_deltas": ai_evaluation,
-            "standings": _format_standings(sim_data, ai_insights)
-        }
-        
-    except Exception as e:
-        print(f"API Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    
-from app.engine.simulator import generate_all_fixture_odds
 
 @app.get("/api/fixtures")
 def get_fixture_odds(team: Optional[str] = None, db: Session = Depends(get_db)):
-    """Returns simulated odds and projected scores for all 380 Premier League matches."""
     try:
         db_ratings = db.query(TeamRating).all()
         if not db_ratings:
@@ -249,7 +136,72 @@ def get_fixture_odds(team: Optional[str] = None, db: Session = Depends(get_db)):
         if team:
             filtered = [f for f in all_fixtures if f["home_team"] == team or f["away_team"] == team]
             return {"status": "success", "count": len(filtered), "fixtures": filtered}
-            
         return {"status": "success", "count": len(all_fixtures), "fixtures": all_fixtures}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/team/{team_name}")
+def get_team_squad_and_stats(team_name: str):
+    """Returns official badge, full roster, top scorers, and factual injury notes."""
+    team_data = fetch_team_details()
+    matched = team_data.get(team_name)
+    if not matched:
+        for name, data in team_data.items():
+            if name.lower() in team_name.lower() or team_name.lower() in name.lower():
+                matched = data
+                break
+    if not matched:
+        raise HTTPException(status_code=404, detail="Team not found in FPL data")
+
+    sorted_players = sorted(matched["players"], key=lambda x: x["minutes"], reverse=True)
+    return {
+        "status": "success",
+        "name": matched["name"],
+        "badge_url": matched["badge_url"],
+        "official_injuries": matched["injuries"],
+        "top_scorers": sorted(matched["players"], key=lambda x: x["goals"], reverse=True)[:5],
+        "squad": sorted_players
+    }
+
+@app.post("/api/simulate/custom")
+def run_custom_simulation(request: CustomSimulationRequest, db: Session = Depends(get_db)):
+    try:
+        db_ratings = db.query(TeamRating).all()
+        if not db_ratings:
+            raise HTTPException(status_code=400, detail="Database empty.")
+
+        override_dict = {
+            team: {"att_delta": data.att_delta, "def_delta": data.def_delta}
+            for team, data in request.overrides.items()
+        }
+        ratings, ai_insights = _build_ratings_dict(db_ratings, override_dict)
+        sim_data = run_season_simulation(ratings, num_simulations=1000)
+        return {
+            "status": "success",
+            "source": "Custom Manual Simulation",
+            "iterations": 1000, 
+            "standings": _format_standings(sim_data, ai_insights)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/simulate/nlp-scenario")
+def run_nlp_scenario(request: NLPSimulationRequest, db: Session = Depends(get_db)):
+    try:
+        db_ratings = db.query(TeamRating).all()
+        if not db_ratings:
+            raise HTTPException(status_code=400, detail="Database empty.")
+
+        ai_evaluation = evaluate_custom_scenario(request.team, request.scenario)
+        override_dict = {request.team: ai_evaluation}
+        ratings, ai_insights = _build_ratings_dict(db_ratings, override_dict)
+        sim_data = run_season_simulation(ratings, num_simulations=1000)
+        return {
+            "status": "success",
+            "source": "AI Scenario Simulation",
+            "iterations": 1000, 
+            "ai_deltas": ai_evaluation,
+            "standings": _format_standings(sim_data, ai_insights)
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -7,9 +7,14 @@ LEAGUE_AVG_GOALS = 1.35
 def calculate_expected_goals(
     h_att: float, h_def: float, a_att: float, a_def: float
 ) -> Tuple[float, float]:
-    # Divide by opponent defense so stronger backlines suppress goals
-    lambda_home = (h_att / max(0.2, a_def)) * LEAGUE_AVG_GOALS * HOME_ADVANTAGE
-    lambda_away = (a_att / max(0.2, h_def)) * LEAGUE_AVG_GOALS
+    # max(0.2, ...) guarantees defense is never 0
+    safe_a_def = max(0.2, float(a_def)) if a_def is not None else 1.0
+    safe_h_def = max(0.2, float(h_def)) if h_def is not None else 1.0
+    safe_h_att = max(0.2, float(h_att)) if h_att is not None else 1.0
+    safe_a_att = max(0.2, float(a_att)) if a_att is not None else 1.0
+    lambda_home = (safe_h_att / safe_a_def) * LEAGUE_AVG_GOALS * HOME_ADVANTAGE
+    lambda_away = (safe_a_att / safe_h_def) * LEAGUE_AVG_GOALS
+    
     return lambda_home, lambda_away
 
 def simulate_match(lambda_home: float, lambda_away: float) -> Tuple[int, int]:
